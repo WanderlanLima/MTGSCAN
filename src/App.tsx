@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
 import { Camera, RefreshCw, X, Search, Globe } from 'lucide-react';
 
@@ -28,20 +28,24 @@ const App: React.FC = () => {
   const streamRef = useRef<MediaStream | null>(null);
 
   const startCamera = async () => {
+    setError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
       });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        streamRef.current = stream;
-        setIsScanning(true);
-      }
+      streamRef.current = stream;
+      setIsScanning(true);
     } catch (err) {
       setError('Não foi possível acessar a câmera. Verifique as permissões.');
       console.error(err);
     }
   };
+
+  useEffect(() => {
+    if (isScanning && streamRef.current && videoRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  }, [isScanning]);
 
   const stopCamera = () => {
     if (streamRef.current) {
@@ -146,7 +150,7 @@ const App: React.FC = () => {
   return (
     <div className="app-container">
       <div className="logo-overlay">
-        <img src="/ScanMTG/logo.png" className="logo-img" alt="ScanMTG" />
+        <img src="/MTGSCAN/logo.png" className="logo-img" alt="ScanMTG" />
         <span className="logo-text">ScanMTG</span>
       </div>
 
