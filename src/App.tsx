@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
-import { Camera, RefreshCw, X, Search, Globe } from 'lucide-react';
+import { Camera, RefreshCw, X, Search, Globe, Eye } from 'lucide-react';
 
 interface CardData {
   name: string;
@@ -22,6 +22,7 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [debugText, setDebugText] = useState<string>('');
+  const [showOCRPreview, setShowOCRPreview] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -31,13 +32,16 @@ const App: React.FC = () => {
     setError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1920 }, // Higher res for better OCR
+          height: { ideal: 1080 }
+        }
       });
       streamRef.current = stream;
       setIsScanning(true);
     } catch (err) {
       setError('Não foi possível acessar a câmera. Verifique as permissões.');
-      console.error(err);
     }
   };
 
@@ -55,49 +59,70 @@ const App: React.FC = () => {
     setIsScanning(false);
   };
 
+  const preprocessImage = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+
+    // Grayscale + High Contrast
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+
+      // Grayscale
+      let v = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+      // Increased Contrast / Thresholding
+      // MTG card names are usually dark on light or light on dark
+      // We aim for black text on white background
+      v = v > 140 ? 255 : 0;
+
+      data[i] = data[i + 1] = data[i + 2] = v;
+    }
+    ctx.putImageData(imageData, 0, 0);
+  };
+
   const captureAndScan = async () => {
     if (!videoRef.current || !canvasRef.current) return;
 
     setLoading(true);
     setError(null);
+    setDebugText('Processando imagem...');
 
     const canvas = canvasRef.current;
     const video = videoRef.current;
-    const context = canvas.getContext('2d');
+    const context = canvas.getContext('2d', { willReadFrequently: true });
 
     if (context) {
-      const scanWidth = 280;
-      const scanHeight = 60;
+      // Scale capture size
+      const scanWidth = 600; // Increased for better OCR
+      const scanHeight = 120;
 
       canvas.width = scanWidth;
       canvas.height = scanHeight;
 
-      const sx = (video.videoWidth - scanWidth) / 2;
-      const sy = video.videoHeight * 0.15;
+      // Card name is usually at the top
+      // We take a wider area to be sure
+      const sx = (video.videoWidth - scanWidth * (video.videoWidth / 1280)) / 2;
+      const sy = video.videoHeight * 0.12;
+      const sWidth = scanWidth * (video.videoWidth / 1280);
+      const sHeight = scanHeight * (video.videoHeight / 720);
 
-      context.drawImage(video, sx, sy, scanWidth, scanHeight, 0, 0, scanWidth, scanHeight);
-
-      const imageData = context.getImageData(0, 0, scanWidth, scanHeight);
-      const data = imageData.data;
-      for (let i = 0; i < data.length; i += 4) {
-        const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-        const color = avg > 128 ? 255 : 0;
-        data[i] = data[i + 1] = data[i + 2] = color;
-      }
-      context.putImageData(imageData, 0, 0);
+      context.drawImage(video, sx, sy, sWidth, sHeight, 0, 0, scanWidth, scanHeight);
+      preprocessImage(context, scanWidth, scanHeight);
 
       try {
         const worker = await createWorker('eng');
-        const { data: { text } } = await worker.recognize(canvas);
+        const { data: { text, confidence } } = await worker.recognize(canvas);
         await worker.terminate();
 
-        const cleanedText = text.trim().replace(/[^a-zA-Z\s]/g, '');
-        setDebugText(cleanedText);
+        const cleanedText = text.trim().replace(/[^a-zA-Z\s]/g, ' ').replace(/\s+/g, ' ');
+        setDebugText(`${cleanedText} (${confidence}%)`);
 
-        if (cleanedText.length > 3) {
+        if (cleanedText.length > 3 && confidence > 20) {
           await searchCard(cleanedText);
         } else {
-          setError('Não foi possível ler o nome da carta. Tente focar melhor no título.');
+          setError('Texto muito confuso. Tente aproximar mais a câmera do nome da carta.');
         }
       } catch (err) {
         setError('Erro no processamento OCR.');
@@ -109,25 +134,35 @@ const App: React.FC = () => {
 
   const searchCard = async (name: string) => {
     try {
-      const response = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}`);
+      // First try to autocomplete to find a close match
+      const autoResponse = await fetch(`https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(name)}`);
+      const autoData = await autoResponse.json();
+
+      let targetName = name;
+      if (autoData.data && autoData.data.length > 0) {
+        targetName = autoData.data[0]; // Use the most likely name
+      }
+
+      const response = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(targetName)}`);
       if (!response.ok) throw new Error('Carta não encontrada');
 
       const data = await response.json();
 
+      // Always look for PT version if current is EN
       if (data.lang !== 'pt') {
         const ptResponse = await fetch(`https://api.scryfall.com/cards/search?q=!"${data.name}"+lang:pt`);
         if (ptResponse.ok) {
           const ptData = await ptResponse.json();
           if (ptData.data && ptData.data.length > 0) {
-            setResult(ptData.data[0]);
+            setResult({ ...ptData.data[0], translated_text: undefined });
             return;
           }
         }
       }
 
-      setResult(data);
+      setResult({ ...data, translated_text: undefined });
     } catch (err) {
-      setError('Carta não encontrada no banco de dados Scryfall.');
+      setError('Carta não identificada com clareza. Tente novamente.');
     }
   };
 
@@ -135,13 +170,12 @@ const App: React.FC = () => {
     if (!result || !result.oracle_text) return;
     setLoading(true);
     try {
-      const textToTranslate = result.oracle_text;
-      const response = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=pt&dt=t&q=${encodeURIComponent(textToTranslate)}`);
+      const response = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=pt&dt=t&q=${encodeURIComponent(result.oracle_text)}`);
       const data = await response.json();
       const translated = data[0].map((item: any) => item[0]).join('');
       setResult({ ...result, translated_text: translated });
     } catch (err) {
-      setError('Erro ao traduzir automaticamente.');
+      setError('Erro na tradução.');
     } finally {
       setLoading(false);
     }
@@ -166,9 +200,9 @@ const App: React.FC = () => {
           <>
             <video ref={videoRef} autoPlay playsInline />
             <div className="scanner-overlay">
-              <div className="scan-area"></div>
-              <div style={{ marginTop: '20px', color: 'white', textShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>
-                Posicione o nome da carta no retângulo
+              <div className="scan-area" style={{ width: '320px', height: '80px' }}></div>
+              <div style={{ marginTop: '20px', color: 'white', background: 'rgba(0,0,0,0.6)', padding: '5px 15px', borderRadius: '20px', fontSize: '0.9rem' }}>
+                Enquadre o nome da carta no topo
               </div>
             </div>
 
@@ -179,16 +213,30 @@ const App: React.FC = () => {
                 disabled={loading}
               >
                 {loading ? <RefreshCw size={24} className="animate-spin" /> : <Search size={24} />}
-                {loading ? 'Escaneando...' : 'Escanear Carta'}
+                {loading ? 'Lendo...' : 'Escanear'}
               </button>
               <button
                 className="glass"
-                style={{ color: 'white', padding: '16px', borderRadius: '50%' }}
+                style={{ color: 'white', padding: '16px', borderRadius: '50%', pointerEvents: 'auto' }}
+                onClick={() => setShowOCRPreview(!showOCRPreview)}
+              >
+                <Eye size={24} />
+              </button>
+              <button
+                className="glass"
+                style={{ color: 'white', padding: '16px', borderRadius: '50%', pointerEvents: 'auto' }}
                 onClick={stopCamera}
               >
                 <X size={24} />
               </button>
             </div>
+
+            {showOCRPreview && (
+              <div style={{ position: 'absolute', top: '80px', left: '50%', transform: 'translateX(-50%)', zIndex: 60, background: '#000', border: '1px solid var(--accent-blue)', borderRadius: '8px', overflow: 'hidden' }}>
+                <canvas ref={canvasRef} style={{ display: 'block', maxWidth: '300px' }} />
+                <div style={{ fontSize: '10px', color: '#fff', padding: '4px', textAlign: 'center' }}>VISÃO DO SCANNER (Contraste Ativo)</div>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -196,7 +244,7 @@ const App: React.FC = () => {
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
       {error && (
-        <div style={{ position: 'fixed', top: '80px', left: '20px', right: '20px', background: 'var(--accent-red)', padding: '12px', borderRadius: '8px', zIndex: 200, fontSize: '0.9rem' }}>
+        <div style={{ position: 'fixed', top: '100px', left: '20px', right: '20px', background: 'var(--accent-red)', padding: '12px', borderRadius: '8px', zIndex: 200, fontSize: '0.85rem', boxShadow: '0 4px 15px rgba(0,0,0,0.4)' }}>
           {error}
         </div>
       )}
@@ -204,13 +252,13 @@ const App: React.FC = () => {
       {result && (
         <div className={`card-result glass open`}>
           <div className="card-header">
-            <div>
+            <div style={{ flex: 1 }}>
               {result.lang === 'pt' ? (
-                <span className="translation-badge">Tradução Oficial PT-BR</span>
+                <span className="translation-badge">Tradução Oficial</span>
               ) : (
-                <span className="translation-badge badge-auto">Inglês (Tradução Indisponível)</span>
+                <span className="translation-badge badge-auto">Tradução Automática</span>
               )}
-              <h2>{result.printed_name || result.name}</h2>
+              <h2 style={{ fontSize: '1.25rem', marginTop: '4px' }}>{result.printed_name || result.name}</h2>
               <div className="card-type">{result.printed_type_line || result.type_line}</div>
             </div>
             <button className="close-btn" onClick={() => setResult(null)}>
@@ -219,22 +267,24 @@ const App: React.FC = () => {
           </div>
 
           <div className="card-text">
-            {result.translated_text || result.printed_text || result.oracle_text || 'Sem texto de regras.'}
+            {result.translated_text || result.printed_text || result.oracle_text || 'Carregando...'}
           </div>
 
           {result.image_uris && (
-            <img
-              src={result.image_uris.normal}
-              alt={result.name}
-              style={{ width: '100%', borderRadius: '12px', marginTop: '10px' }}
-            />
+            <div style={{ width: '100%', maxHeight: '40vh', overflow: 'hidden', borderRadius: '12px' }}>
+              <img
+                src={result.image_uris.normal}
+                alt={result.name}
+                style={{ width: '100%', objectFit: 'contain' }}
+              />
+            </div>
           )}
 
           {result.lang !== 'pt' && !result.translated_text && (
-            <div style={{ marginTop: '16px', display: 'flex', gap: '8px' }}>
-              <button className="btn-primary" style={{ flex: 1, fontSize: '0.9rem' }} onClick={translateText}>
+            <div style={{ marginTop: '16px' }}>
+              <button className="btn-primary" style={{ width: '100%', fontSize: '0.9rem' }} onClick={translateText}>
                 <Globe size={18} />
-                Traduzir Automaticamente
+                Traduzir Texto da Carta
               </button>
             </div>
           )}
@@ -242,8 +292,8 @@ const App: React.FC = () => {
       )}
 
       {debugText && (
-        <div style={{ position: 'fixed', bottom: '100px', left: '20px', color: 'var(--text-secondary)', fontSize: '0.7rem' }}>
-          OCR Debug: {debugText}
+        <div style={{ position: 'fixed', bottom: '110px', left: '50%', transform: 'translateX(-50%)', color: 'var(--text-secondary)', fontSize: '0.7rem', whiteSpace: 'nowrap', background: 'rgba(0,0,0,0.5)', padding: '2px 10px', borderRadius: '10px' }}>
+          OCR: {debugText}
         </div>
       )}
     </div>
