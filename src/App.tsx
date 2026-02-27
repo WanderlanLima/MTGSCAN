@@ -143,8 +143,8 @@ const App: React.FC = () => {
 
       // Look for lines that look like English MTG card names
       const lines = text.split('\n')
-        .map(l => l.trim().replace(/[^a-zA-Z\s]/g, ''))
-        .filter(l => l.length > 4);
+        .map((l: string) => l.trim().replace(/[^a-zA-Z\s]/g, ''))
+        .filter((l: string) => l.length > 4);
 
       if (lines.length > 0) {
         setDebugText(`Buscando: ${lines[0].substring(0, 15)}...`);
