@@ -14,6 +14,8 @@ interface CardData {
     normal: string;
   };
   lang: string;
+  set: string;
+  collector_number: string;
 }
 
 const App: React.FC = () => {
@@ -28,6 +30,7 @@ const App: React.FC = () => {
   const [activeCameraIndex, setActiveCameraIndex] = useState(0);
   const [flashlight, setFlashlight] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1);
+  const [previewCanvas, setPreviewCanvas] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -50,7 +53,6 @@ const App: React.FC = () => {
     };
     initWorker();
 
-    // Get available cameras
     const getCameras = async () => {
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
@@ -70,7 +72,6 @@ const App: React.FC = () => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
     }
-
     setError(null);
     try {
       const constraints: any = {
@@ -81,24 +82,13 @@ const App: React.FC = () => {
           height: { ideal: 1080 }
         }
       };
-
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
+      if (videoRef.current) videoRef.current.srcObject = stream;
       setIsScanning(true);
-
-      // Try to enable focus track if supported
-      const track = stream.getVideoTracks()[0];
-      const capabilities = track.getCapabilities() as any;
-      if (capabilities.focusMode) {
-        await track.applyConstraints({ focusMode: 'continuous' } as any);
-      }
-
+      setResult(null);
     } catch (err) {
-      setError('Acesso à câmera negado ou lente indisponível.');
+      setError('Acesso à câmera negado.');
     }
   };
 
@@ -112,20 +102,12 @@ const App: React.FC = () => {
     if (!streamRef.current) return;
     const track = streamRef.current.getVideoTracks()[0];
     try {
-      await track.applyConstraints({
-        advanced: [{ torch: !flashlight }]
-      } as any);
+      await track.applyConstraints({ advanced: [{ torch: !flashlight }] } as any);
       setFlashlight(!flashlight);
     } catch (e) {
-      setError("Lanterna não suportada nesta lente.");
+      setError("Lanterna não disponível nesta lente.");
     }
   };
-
-  useEffect(() => {
-    if (isScanning && streamRef.current && videoRef.current) {
-      videoRef.current.srcObject = streamRef.current;
-    }
-  }, [isScanning]);
 
   const stopCamera = () => {
     if (streamRef.current) {
@@ -135,100 +117,138 @@ const App: React.FC = () => {
     setIsScanning(false);
   };
 
-  const preprocessImage = (ctx: CanvasRenderingContext2D, width: number, height: number, threshold: number) => {
+  const processZone = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
     const imageData = ctx.getImageData(0, 0, width, height);
     const data = imageData.data;
+    // High contrast thresholding
     for (let i = 0; i < data.length; i += 4) {
-      const gray = (0.34 * data[i] + 0.5 * data[i + 1] + 0.16 * data[i + 2]);
-      const v = gray > threshold ? 255 : 0;
+      const brightness = (0.34 * data[i] + 0.5 * data[i + 1] + 0.16 * data[i + 2]);
+      const v = brightness > 125 ? 255 : 0;
       data[i] = data[i + 1] = data[i + 2] = v;
     }
     ctx.putImageData(imageData, 0, 0);
   };
 
   const captureAndScan = async () => {
-    if (!videoRef.current || !canvasRef.current || !workerRef.current) return;
-
+    if (!videoRef.current || !workerRef.current) return;
     setLoading(true);
     setError(null);
-    setResult(null);
+    setDebugText('Focando...');
+
+    const video = videoRef.current;
+    const canvas = document.createElement('canvas'); // Temp canvas for processing
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) return;
+
+    // We capture a high-res frame but focus our crops
+    const videoWidth = video.videoWidth;
+    const videoHeight = video.videoHeight;
+
+    // Pass 1: Card Title (Top 12%)
+    const titleWidth = 800;
+    const titleHeight = 100;
+    canvas.width = titleWidth;
+    canvas.height = titleHeight;
+
+    const sx = (videoWidth - titleWidth * (videoWidth / 1280)) / 2;
+    const sy = videoHeight * 0.12;
+    const sw = titleWidth * (videoWidth / 1280);
+    const sh = titleHeight * (videoHeight / 720);
+
+    context.drawImage(video, sx, sy, sw, sh, 0, 0, titleWidth, titleHeight);
+    processZone(context, titleWidth, titleHeight);
+
+    if (showOCRPreview) setPreviewCanvas(canvas.toDataURL());
 
     try {
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      const context = canvas.getContext('2d', { willReadFrequently: true });
-      if (!context) return;
+      setDebugText('Lendo título...');
+      const { data: { text: titleText } } = await workerRef.current.recognize(canvas);
 
-      // Capture Size
-      const size = 1000;
-      canvas.width = size;
-      canvas.height = size;
+      // Pass 2: Collector Info (Bottom Left)
+      const infoWidth = 400;
+      const infoHeight = 80;
+      canvas.width = infoWidth;
+      canvas.height = infoHeight;
+      const infoSx = sx; // Keep same horizontal alignment
+      const infoSy = videoHeight * 0.82; // Bottom area
 
-      // Digital Zoom Crop
-      const zoomFactor = zoomLevel;
-      const sSize = (video.videoWidth / zoomFactor) * (1000 / 1280); // Relative to baseline
-      const sx = (video.videoWidth - sSize) / 2;
-      const sy = (video.videoHeight - sSize) / 2;
+      context.drawImage(video, infoSx, infoSy, sw / 2, sh, 0, 0, infoWidth, infoHeight);
+      processZone(context, infoWidth, infoHeight);
 
-      // We will try 3 different thresholds to catch text
-      const thresholds = [100, 130, 160];
-      let bestResult = null;
+      setDebugText('Lendo rodapé...');
+      const { data: { text } } = await workerRef.current.recognize(canvas);
 
-      for (const thr of thresholds) {
-        setDebugText(`Tentativa (Limiar ${thr})...`);
-        context.drawImage(video, sx, sy, sSize, sSize, 0, 0, size, size);
-        preprocessImage(context, size, size, thr);
+      const lines = text.split('\n')
+        .map((l: string) => l.trim().replace(/[^a-zA-Z\s]/g, ''))
+        .filter((l: string) => l.length > 4);
+      const infoMatch = text.match(/([A-Z0-9]{3,})\s*(\d+)/i);
 
-        const { data: { text } } = await workerRef.current.recognize(canvas);
-        const lines = text.split('\n')
-          .map(l => l.trim().replace(/[^a-zA-Z\s]/g, ''))
-          .filter(l => l.length > 4);
+      const cleanTitle = titleText.trim().replace(/[^a-zA-Z\s]/g, '');
 
-        if (lines.length > 0) {
-          const found = await searchMultipleFuzzy(lines.slice(0, 5));
-          if (found) {
-            bestResult = found;
-            break;
-          }
-        }
+      if (infoMatch) {
+        setDebugText(`ID Encontrado: ${infoMatch[1]}/${infoMatch[2]}`);
+        await searchByInfo(infoMatch[1], infoMatch[2]);
+      } else if (cleanTitle.length > 3) {
+        setDebugText(`Buscando Nome: ${cleanTitle.substring(0, 10)}...`);
+        await searchByName(cleanTitle);
+      } else {
+        setError("Não consegui ler a carta. Tente focar no título ou no rodapé.");
       }
 
-      if (!bestResult) {
-        setError('Não consegui identificar a carta. Experimente trocar a lente ou ligar a lanterna.');
-      }
     } catch (err) {
-      setError('Erro no processamento.');
+      setError("Erro no Scanner.");
     } finally {
       setLoading(false);
       setDebugText('');
     }
   };
 
-  const searchMultipleFuzzy = async (lines: string[]) => {
-    for (const query of lines) {
-      try {
-        const res = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(query)}`);
-        if (res.ok) return await res.json();
-      } catch (e) { }
-    }
-    return null;
+  const searchByInfo = async (set: string, num: string) => {
+    try {
+      const resp = await fetch(`https://api.scryfall.com/cards/${set.toLowerCase()}/${num}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        await fetchPTVersion(data);
+      } else {
+        setError("Info de rodapé não encontrada no banco. Tentando por nome...");
+      }
+    } catch (e) { }
   };
 
-  useEffect(() => {
-    if (result) fetchPTVersion(result);
-  }, [result && result.name]);
+  const searchByName = async (name: string) => {
+    try {
+      const autoRes = await fetch(`https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(name)}`);
+      const autoData = await autoRes.json();
+      const targetName = (autoData.data && autoData.data.length > 0) ? autoData.data[0] : name;
+
+      const res = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(targetName)}`);
+      if (res.ok) {
+        const data = await res.json();
+        await fetchPTVersion(data);
+      } else {
+        setError("Carta não identificada.");
+      }
+    } catch (e) { }
+  };
 
   const fetchPTVersion = async (cardData: any) => {
-    if (!cardData || cardData.lang === 'pt') return;
+    if (cardData.lang === 'pt') {
+      setResult(cardData);
+      return;
+    }
     try {
       const ptRes = await fetch(`https://api.scryfall.com/cards/search?q=!"${cardData.name}"+lang:pt`);
       if (ptRes.ok) {
         const ptData = await ptRes.json();
         if (ptData.data && ptData.data.length > 0) {
           setResult(ptData.data[0]);
+          return;
         }
       }
-    } catch (e) { }
+      setResult(cardData);
+    } catch {
+      setResult(cardData);
+    }
   };
 
   const translateText = async () => {
@@ -240,7 +260,7 @@ const App: React.FC = () => {
       const data = await resp.json();
       setResult({ ...result, translated_text: data[0].map((i: any) => i[0]).join('') });
     } catch (e) {
-      setError('Falha na tradução.');
+      setError('Erro na tradução.');
     } finally {
       setLoading(false);
     }
@@ -256,38 +276,40 @@ const App: React.FC = () => {
       <div className="scanner-viewport">
         {!isScanning ? (
           <div className="scanner-overlay" style={{ pointerEvents: 'auto' }}>
-            <h1 style={{ marginBottom: '5px' }}>ScanMTG</h1>
-            <p style={{ color: 'var(--text-secondary)', marginBottom: '30px' }}>Toque para começar</p>
-            <button className="btn-primary" onClick={() => startCamera()} style={{ padding: '20px 40px' }}>
+            <h1 style={{ marginBottom: '10px' }}>ScanMTG</h1>
+            <p style={{ color: 'var(--text-secondary)', marginBottom: '40px', fontSize: '0.9rem' }}>Scanner de alta precisão</p>
+            <button className="btn-primary" onClick={() => startCamera()} style={{ padding: '22px 50px', fontSize: '1.2rem' }}>
               <Camera size={28} />
-              INICIAR
+              INICIAR SCANNER
             </button>
           </div>
         ) : (
           <>
             <video ref={videoRef} autoPlay playsInline muted />
-
             <div className="scanner-overlay">
-              <div className="scan-focus-corners">
+              <div className="scan-focus-corners" style={{ width: '280px', height: '400px' }}>
                 <div className="corner tl"></div><div className="corner tr"></div>
                 <div className="corner bl"></div><div className="corner br"></div>
+              </div>
+              <div className="guide-text" style={{ marginTop: '20px', color: '#fff', fontSize: '0.8rem', background: 'rgba(0,0,0,0.6)', padding: '10px 20px', borderRadius: '30px' }}>
+                Alinhe o <b>título</b> e o <b>rodapé</b> da carta
               </div>
             </div>
 
             <div className="camera-actions" style={{ position: 'absolute', right: '20px', top: '100px', display: 'flex', flexDirection: 'column', gap: '20px', pointerEvents: 'auto' }}>
-              <button className="glass" onClick={switchLens} style={{ padding: '12px', borderRadius: '50%', color: 'white' }}>
+              <button className="glass" onClick={switchLens} style={{ padding: '14px', borderRadius: '50%', color: 'white' }}>
                 <Repeat size={24} />
               </button>
-              <button className="glass" onClick={toggleFlashlight} style={{ padding: '12px', borderRadius: '50%', color: flashlight ? 'var(--accent-blue)' : 'white' }}>
+              <button className="glass" onClick={toggleFlashlight} style={{ padding: '14px', borderRadius: '50%', color: flashlight ? 'var(--accent-blue)' : 'white' }}>
                 <Zap size={24} />
               </button>
-              <button className="glass" onClick={() => setZoomLevel(zoomLevel === 1 ? 2 : 1)} style={{ padding: '12px', borderRadius: '50%', color: zoomLevel > 1 ? 'var(--accent-blue)' : 'white' }}>
-                <ZoomIn size={24} />
+              <button className="glass" onClick={() => setShowOCRPreview(!showOCRPreview)} style={{ padding: '14px', borderRadius: '50%', color: showOCRPreview ? 'var(--accent-blue)' : 'white' }}>
+                <Eye size={24} />
               </button>
             </div>
 
             <div className="controls">
-              <button className="btn-primary" onClick={captureAndScan} disabled={loading || !workerReady} style={{ transform: 'scale(1.1)' }}>
+              <button className="btn-primary" onClick={captureAndScan} disabled={loading || !workerReady} style={{ transform: 'scale(1.2)' }}>
                 {loading ? <RefreshCw size={24} className="animate-spin" /> : <Search size={24} />}
                 {loading ? 'ANALISANDO...' : 'ESCANEAR'}
               </button>
@@ -295,6 +317,13 @@ const App: React.FC = () => {
                 <X size={24} />
               </button>
             </div>
+
+            {showOCRPreview && previewCanvas && (
+              <div style={{ position: 'absolute', top: '90px', left: '20px', background: '#000', border: '1px solid var(--accent-blue)', borderRadius: '8px', overflow: 'hidden', zIndex: 60 }}>
+                <img src={previewCanvas} style={{ display: 'block', maxWidth: '150px' }} alt="OCR Preview" />
+                <div style={{ fontSize: '8px', color: '#fff', padding: '2px', textAlign: 'center' }}>VISÃO DO SCANNER</div>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -302,7 +331,7 @@ const App: React.FC = () => {
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
       {error && (
-        <div style={{ position: 'fixed', top: '80px', left: '25px', right: '25px', background: 'var(--accent-red)', color: '#fff', padding: '15px', borderRadius: '16px', zIndex: 200, textAlign: 'center', boxShadow: '0 8px 30px rgba(0,0,0,0.5)' }}>
+        <div style={{ position: 'fixed', top: '100px', left: '25px', right: '25px', background: 'var(--accent-red)', color: '#fff', padding: '15px', borderRadius: '16px', zIndex: 200, textAlign: 'center', boxShadow: '0 8px 30px rgba(0,0,0,0.5)' }}>
           <AlertCircle size={20} style={{ marginBottom: '5px' }} />
           <div style={{ fontSize: '0.85rem' }}>{error}</div>
         </div>
@@ -313,27 +342,25 @@ const App: React.FC = () => {
           <div className="card-header">
             <div style={{ flex: 1 }}>
               <span className={`translation-badge ${result.lang !== 'pt' ? 'badge-auto' : ''}`}>
-                {result.lang === 'pt' ? 'Tradução Oficial' : 'Tradução IA'}
+                {result.lang === 'pt' ? 'Tradução Oficial' : 'Tradução IA / Fallback'}
               </span>
               <h2>{result.printed_name || result.name}</h2>
               <div className="card-type">{result.printed_type_line || result.type_line}</div>
             </div>
             <button className="close-btn" onClick={() => setResult(null)}><X size={20} /></button>
           </div>
-
           <div className="card-text">{result.translated_text || result.printed_text || result.oracle_text}</div>
           {result.image_uris && <img src={result.image_uris.normal} alt={result.name} style={{ width: '100%', borderRadius: '16px' }} />}
-
           {result.lang !== 'pt' && !result.translated_text && (
-            <button className="btn-primary" style={{ width: '100%', marginTop: '15px' }} onClick={translateText}>
-              <Globe size={18} /> Traduzir Texto
+            <button className="btn-primary" style={{ width: '100%', marginTop: '15px', borderRadius: '12px' }} onClick={translateText}>
+              <Globe size={18} /> TRADUZIR TEXTO
             </button>
           )}
         </div>
       )}
 
       {debugText && (
-        <div style={{ position: 'fixed', bottom: '110px', left: '50%', transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.7)', fontSize: '0.65rem' }}>
+        <div style={{ position: 'fixed', bottom: '110px', left: '50%', transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.8)', fontSize: '0.7rem', backgroundColor: 'rgba(0,0,0,0.5)', padding: '5px 15px', borderRadius: '20px' }}>
           {debugText}
         </div>
       )}
