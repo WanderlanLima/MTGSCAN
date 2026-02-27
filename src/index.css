@@ -42,7 +42,6 @@ body {
   position: relative;
 }
 
-/* Glassmorphism utility */
 .glass {
   background: var(--glass);
   backdrop-filter: blur(12px);
@@ -51,20 +50,14 @@ body {
   border-radius: 16px;
 }
 
-/* Animations */
-@keyframes pulse {
-  0% { opacity: 0.6; transform: scale(1); }
-  50% { opacity: 1; transform: scale(1.02); }
-  100% { opacity: 0.6; transform: scale(1); }
-}
-
 @keyframes scan-line {
-  0% { top: 0%; }
-  100% { top: 100%; }
-}
+  0% {
+    top: 0%;
+  }
 
-.animate-pulse {
-  animation: pulse 2s infinite ease-in-out;
+  100% {
+    top: 100%;
+  }
 }
 
 .scanner-viewport {
@@ -93,24 +86,58 @@ video {
   pointer-events: none;
 }
 
-.scan-area {
-  width: 280px;
-  height: 60px;
-  border: 2px solid var(--accent-blue);
-  border-radius: 8px;
+/* Portrait Card Guide */
+.scan-area-card {
+  width: 250px;
+  height: 350px;
+  border: 2px solid rgba(88, 166, 255, 0.5);
+  border-radius: 12px;
   position: relative;
-  box-shadow: 0 0 20px rgba(88, 166, 255, 0.3);
+  box-shadow: 0 0 0 2000px rgba(0, 0, 0, 0.5);
 }
 
-.scan-area::after {
-  content: '';
+.scan-area-card::before {
+  content: 'TOPO (NOME)';
+  position: absolute;
+  top: -25px;
+  left: 0;
+  width: 100%;
+  text-align: center;
+  font-size: 10px;
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.scan-area-card::after {
+  content: 'RODAPÉ (COLEÇÃO)';
+  position: absolute;
+  bottom: -25px;
+  left: 0;
+  width: 100%;
+  text-align: center;
+  font-size: 10px;
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.scan-zone-indicator {
   position: absolute;
   left: 0;
   width: 100%;
-  height: 2px;
-  background: var(--accent-blue);
-  box-shadow: 0 0 10px var(--accent-blue);
-  animation: scan-line 2s linear infinite;
+  border: 1px dashed var(--accent-blue);
+  background: rgba(88, 166, 255, 0.1);
+}
+
+.zone-name {
+  top: 0;
+  height: 50px;
+  border-radius: 10px 10px 0 0;
+}
+
+.zone-info {
+  bottom: 0;
+  height: 40px;
+  border-radius: 0 0 10px 10px;
 }
 
 .controls {
@@ -141,17 +168,33 @@ video {
   gap: 8px;
 }
 
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .card-result {
   position: fixed;
   bottom: 0;
   left: 0;
   right: 0;
+  max-height: 85vh;
   padding: 24px 24px 40px;
   border-radius: 24px 24px 0 0;
   z-index: 100;
   transform: translateY(100%);
   transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
   pointer-events: auto;
+  overflow-y: auto;
 }
 
 .card-result.open {
@@ -178,13 +221,14 @@ video {
 }
 
 .card-text {
-  font-size: 1rem;
-  line-height: 1.6;
+  font-size: 0.95rem;
+  line-height: 1.5;
   color: var(--text-primary);
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.3);
   padding: 16px;
   border-radius: 12px;
   margin-bottom: 16px;
+  border: 1px solid var(--glass-border);
 }
 
 .translation-badge {
@@ -203,11 +247,12 @@ video {
 }
 
 .close-btn {
-  background: none;
+  background: rgba(255, 255, 255, 0.1);
   border: none;
-  color: var(--text-secondary);
+  color: var(--text-primary);
   cursor: pointer;
-  padding: 4px;
+  padding: 8px;
+  border-radius: 50%;
 }
 
 .logo-overlay {
@@ -221,13 +266,13 @@ video {
 }
 
 .logo-img {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
 }
 
 .logo-text {
   font-weight: 600;
-  font-size: 1.2rem;
+  font-size: 1.1rem;
   letter-spacing: -0.5px;
 }
