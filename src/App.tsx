@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
-import { Camera, RefreshCw, X, Search, Globe, AlertCircle, Repeat, Zap, ZoomIn, ShieldCheck } from 'lucide-react';
+import { Camera, RefreshCw, X, Search, Globe, AlertCircle, Repeat, Zap } from 'lucide-react';
 
 interface CardData {
   name: string;
@@ -28,7 +28,6 @@ const App: React.FC = () => {
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [activeCameraIndex, setActiveCameraIndex] = useState(0);
   const [flashlight, setFlashlight] = useState(false);
-  const [zoomLevel, setZoomLevel] = useState(1);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -99,7 +98,6 @@ const App: React.FC = () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         streamRef.current = stream;
-        if (videoRef.current) videoRef.current.srcObject = stream;
         setIsScanning(true);
         success = true;
         break;
@@ -112,6 +110,35 @@ const App: React.FC = () => {
       setError('Não foi possível ativar nenhuma câmera. Verifique se outra aba está usando a câmera.');
     }
   };
+
+  const toggleFlashlight = async () => {
+    if (!streamRef.current) return;
+    const track = streamRef.current.getVideoTracks()[0];
+    try {
+      await track.applyConstraints({ advanced: [{ torch: !flashlight }] } as any);
+      setFlashlight(!flashlight);
+    } catch (e) {
+      setError("Lanterna não disponível nesta lente.");
+    }
+  };
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    setIsScanning(false);
+  };
+
+  useEffect(() => {
+    if (isScanning && streamRef.current && videoRef.current) {
+      const video = videoRef.current;
+      video.srcObject = streamRef.current;
+      video.onloadedmetadata = () => {
+        video.play().catch(e => console.error("Auto-play blocked:", e));
+      };
+    }
+  }, [isScanning]);
 
   const switchLens = () => {
     if (cameras.length < 2) return;
@@ -233,14 +260,14 @@ const App: React.FC = () => {
   return (
     <div className="app-container">
       <div className="logo-overlay">
-        <img src="/MTGSCAN/logo.png" className="logo-img" alt="logo" />
+        <img src="logo.png" className="logo-img" alt="logo" />
         <span className="logo-text">ScanMTG</span>
       </div>
 
       <div className="scanner-viewport">
         {!isScanning ? (
           <div className="scanner-overlay" style={{ pointerEvents: 'auto' }}>
-            <img src="/MTGSCAN/pwa-192x192.png" style={{ width: '80px', borderRadius: '20px', marginBottom: '20px' }} />
+            <img src="pwa-192x192.png" style={{ width: '80px', borderRadius: '20px', marginBottom: '20px' }} alt="PWA Logo" />
             <button className="btn-primary" onClick={() => startCamera()} disabled={!workerReady}>
               {workerReady ? <Camera size={24} /> : <RefreshCw size={24} className="animate-spin" />}
               {workerReady ? 'ABRIR SCANNER' : 'CARREGANDO IA...'}
