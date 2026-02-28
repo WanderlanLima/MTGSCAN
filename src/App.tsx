@@ -1,6 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
-import { Camera, RefreshCw, X, Search, Globe, AlertCircle, Image as ImageIcon } from 'lucide-react';
+import { Camera, RefreshCw, X, Search, Globe, AlertCircle, Image as ImageIcon, Sparkles } from 'lucide-react';
+
+declare global {
+  interface Window {
+    cv: any;
+  }
+}
 
 interface CardData {
   name: string;
@@ -21,13 +27,14 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [debugText, setDebugText] = useState<string>('');
+  const [cvReady, setCvReady] = useState(false);
   const [workerReady, setWorkerReady] = useState(false);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
 
   const workerRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Initialize OCR Worker
+  // Initialize OCR Worker & OpenCV Check
   useEffect(() => {
     let active = true;
     const initWorker = async () => {
@@ -43,9 +50,17 @@ const App: React.FC = () => {
     };
     initWorker();
 
+    const checkCV = setInterval(() => {
+      if (window.cv && window.cv.Mat) {
+        setCvReady(true);
+        clearInterval(checkCV);
+      }
+    }, 500);
+
     return () => {
       active = false;
       if (workerRef.current) workerRef.current.terminate();
+      clearInterval(checkCV);
     };
   }, []);
 
@@ -56,91 +71,163 @@ const App: React.FC = () => {
     setError(null);
     setResult(null);
     setLoading(true);
-    setDebugText('Processando imagem de alta qualidade...');
+    setDebugText('Iniciando Visão Computacional...');
 
-    // Load image for preview and OCR
     const reader = new FileReader();
     reader.onload = async (event) => {
       const imageData = event.target?.result as string;
       setCapturedImage(imageData);
-      await processPhoto(imageData);
+      await processWithVisualIdentity(imageData);
     };
     reader.readAsDataURL(file);
   };
 
-  const processPhoto = async (imageSrc: string) => {
-    if (!workerRef.current) return;
+  const processWithVisualIdentity = async (imageSrc: string) => {
+    if (!workerRef.current || !cvReady) {
+      setError("Sistema de visão ainda carregando...");
+      setLoading(false);
+      return;
+    }
 
     try {
       const img = new Image();
       img.src = imageSrc;
       await img.decode();
 
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+      const cv = window.cv;
+      const src = cv.imread(img);
+      const dst = new cv.Mat();
 
-      // We process the original high-res image for better OCR
-      // Pass 1: Card Title Zone (Top 15%)
-      canvas.width = img.width;
-      canvas.height = img.height * 0.15;
-      ctx.drawImage(img, 0, 0, img.width, img.height * 0.15, 0, 0, canvas.width, canvas.height);
+      setDebugText('Detectando bordas da carta...');
 
-      // Pre-processing Title
-      const titleData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      for (let i = 0; i < titleData.data.length; i += 4) {
-        const avg = (titleData.data[i] + titleData.data[i + 1] + titleData.data[i + 2]) / 3;
-        const v = avg > 110 ? 255 : 0;
-        titleData.data[i] = titleData.data[i + 1] = titleData.data[i + 2] = v;
+      // 1. Pre-process for contour detection
+      cv.cvtColor(src, dst, cv.COLOR_RGBA2GRAY);
+      cv.GaussianBlur(dst, dst, new cv.Size(5, 5), 0);
+      cv.Canny(dst, dst, 75, 200);
+
+      // 2. Find contours
+      const contours = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+      cv.findContours(dst, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      let cardContour = null;
+      let maxArea = 0;
+
+      for (let i = 0; i < contours.size(); ++i) {
+        const cnt = contours.get(i);
+        const area = cv.contourArea(cnt);
+        if (area > 50000) { // Minimum area for a card
+          const peri = cv.arcLength(cnt, true);
+          const approx = new cv.Mat();
+          cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+
+          if (approx.rows === 4 && area > maxArea) {
+            cardContour = approx;
+            maxArea = area;
+          } else {
+            approx.delete();
+          }
+        }
       }
-      ctx.putImageData(titleData, 0, 0);
 
-      setDebugText('Lendo título com precisão...');
-      const { data: { text: titleText } } = await workerRef.current.recognize(canvas);
-
-      // Pass 2: Collector Info Zone (Bottom 15%, Left Half)
-      canvas.height = img.height * 0.15;
-      ctx.drawImage(img, 0, img.height * 0.85, img.width * 0.5, img.height * 0.15, 0, 0, img.width * 0.5, canvas.height);
-
-      setDebugText('Buscando DNA da carta (rodapé)...');
-      const { data: { text: infoText } } = await workerRef.current.recognize(canvas);
-
-      const codes = infoText.match(/([A-Z0-9]{3,})\s*(\d+)/i);
-      if (codes) {
-        await searchBySet(codes[1], codes[2]);
+      if (cardContour) {
+        setDebugText('Alinhando perspectiva...');
+        const warped = warpCard(src, cardContour);
+        await runOCROnWarped(warped);
+        warped.delete();
       } else {
-        const cleanTitle = titleText.trim().replace(/[^a-zA-Z\s]/g, '');
-        if (cleanTitle.length > 2) await searchByName(cleanTitle);
-        else setError("Não consegui ler o nome. Verifique se a foto está bem iluminada e nítida.");
+        // Fallback: Use central crop if no contour is found
+        setDebugText('Bordas não detectadas. Usando modo manual...');
+        await runOCROnWarped(src);
       }
+
+      src.delete();
+      dst.delete();
+      contours.delete();
+      hierarchy.delete();
+      if (cardContour) cardContour.delete();
+
     } catch (e) {
-      setError("Erro ao processar a foto.");
-    } finally {
+      console.error(e);
+      setError("Falha na visão computacional.");
       setLoading(false);
-      setDebugText('');
     }
   };
 
-  const searchBySet = async (set: string, num: string) => {
-    try {
-      const res = await fetch(`https://api.scryfall.com/cards/${set.toLowerCase()}/${num}`);
-      if (res.ok) await fetchPTVersion(await res.json());
-      else {
-        // Fallback to name search if set info is wrong
-        setDebugText('Código não encontrado, tentando por nome...');
-        const cleanTitle = debugText; // Placeholder logic
-        await searchByName(set + " " + num);
-      }
-    } catch (e) { }
+  const warpCard = (src: any, contour: any) => {
+    const cv = window.cv;
+    const pts = [];
+    for (let i = 0; i < 4; i++) {
+      pts.push({ x: contour.data32S[i * 2], y: contour.data32S[i * 2 + 1] });
+    }
+
+    // Sort points: top-left, top-right, bottom-right, bottom-left
+    pts.sort((a, b) => a.y - b.y);
+    const top = pts.slice(0, 2).sort((a, b) => a.x - b.x);
+    const bottom = pts.slice(2, 4).sort((a, b) => a.x - b.x);
+    const sortedPts = [top[0], top[1], bottom[1], bottom[0]];
+
+    const srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+      sortedPts[0].x, sortedPts[0].y,
+      sortedPts[1].x, sortedPts[1].y,
+      sortedPts[2].x, sortedPts[2].y,
+      sortedPts[3].x, sortedPts[3].y,
+    ]);
+
+    const dstW = 500;
+    const dstH = 700;
+    const dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, dstW, 0, dstW, dstH, 0, dstH]);
+    const M = cv.getPerspectiveTransform(srcPts, dstPts);
+    const warped = new cv.Mat();
+    cv.warpPerspective(src, warped, M, new cv.Size(dstW, dstH));
+
+    srcPts.delete();
+    dstPts.delete();
+    M.delete();
+    return warped;
+  };
+
+  const runOCROnWarped = async (warpedMat: any) => {
+    const canvas = document.createElement('canvas');
+    window.cv.imshow(canvas, warpedMat);
+
+    // OCR Zone: Title Bar (Top 12%)
+    const titleCanvas = document.createElement('canvas');
+    titleCanvas.width = canvas.width;
+    titleCanvas.height = canvas.height * 0.12;
+    const tCtx = titleCanvas.getContext('2d')!;
+    tCtx.drawImage(canvas, 0, 0, canvas.width, canvas.height * 0.12, 0, 0, titleCanvas.width, titleCanvas.height);
+
+    setDebugText('Identificando DNA visual...');
+    const { data: { text } } = await workerRef.current.recognize(titleCanvas);
+    const cleanName = text.trim().replace(/[^a-zA-Z\s]/g, '');
+
+    if (cleanName.length > 2) {
+      await searchByName(cleanName);
+    } else {
+      setError("Imagem muito escura ou borrada. Tente novamente.");
+      setLoading(false);
+    }
   };
 
   const searchByName = async (name: string) => {
     try {
+      setDebugText(`Buscando: ${name.substring(0, 15)}...`);
       const auto = await (await fetch(`https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(name)}`)).json();
       const target = (auto.data && auto.data.length > 0) ? auto.data[0] : name;
       const res = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(target)}`);
-      if (res.ok) await fetchPTVersion(await res.json());
-      else setError("Carta não encontrada no banco de dados.");
-    } catch (e) { }
+      if (res.ok) {
+        const data = await res.json();
+        await fetchPTVersion(data);
+      } else {
+        setError("Carta não reconhecida. Tente uma foto mais nítida.");
+      }
+    } catch (e) {
+      setError("Erro na conexão com Scryfall.");
+    } finally {
+      setLoading(false);
+      setDebugText('');
+    }
   };
 
   const fetchPTVersion = async (card: any) => {
@@ -173,29 +260,29 @@ const App: React.FC = () => {
 
   return (
     <div className="app-container">
-      <div className="logo-overlay">
-        <img src="logo.png" className="logo-img" alt="logo" />
-        <span className="logo-text">ScanMTG</span>
-      </div>
+      <header className="logo-overlay">
+        <Sparkles size={28} color="var(--accent-blue)" />
+        <span className="logo-text">ScanMTG <small style={{ fontSize: '0.6rem', opacity: 0.5 }}>OpenCV v2</small></span>
+      </header>
 
       <main className="main-content">
-        {!loading && !result && !capturedImage && (
+        {!loading && !result && (
           <div className="welcome-screen">
             <div className="hero-icon">
               <ImageIcon size={48} color="var(--accent-blue)" />
             </div>
-            <h1>Scanner de Alta Precisão</h1>
-            <p>Use a câmera nativa do seu celular para resultados profissionais.</p>
+            <h1>Visão Computacional</h1>
+            <p>O algoritmo agora detecta as bordas e alinha a carta automaticamente.</p>
 
             <div className="tips-container">
-              <div className="tip-item">✨ Foto nítida e bem iluminada</div>
-              <div className="tip-item">📄 Título da carta legível</div>
-              <div className="tip-item">🎯 Rodapé deve estar visível</div>
+              <div className="tip-item">🔲 Tente enquadrar a carta inteira na foto</div>
+              <div className="tip-item">💡 Evite reflexos fortes na arte</div>
+              <div className="tip-item">🃏 Funciona com qualquer idioma</div>
             </div>
 
-            <button className="btn-primary main-scan-btn" onClick={() => fileInputRef.current?.click()}>
-              <Camera size={24} />
-              IDENTIFICAR CARTA
+            <button className="btn-primary main-scan-btn" onClick={() => fileInputRef.current?.click()} disabled={!cvReady || !workerReady}>
+              {cvReady ? <Camera size={24} /> : <RefreshCw size={24} className="animate-spin" />}
+              {cvReady ? 'ESCANEAR CARTA' : 'CARREGANDO VISÃO...'}
             </button>
           </div>
         )}
@@ -203,8 +290,8 @@ const App: React.FC = () => {
         {loading && (
           <div className="loading-state">
             <RefreshCw size={48} className="animate-spin" color="var(--accent-blue)" />
-            <h2>{debugText || 'Analisando DNA da carta...'}</h2>
-            <p>Isso pode levar alguns segundos devido à alta resolução.</p>
+            <h2>{debugText || 'Analisando...'}</h2>
+            <p>Ajustando perspectiva e limpando ruídos.</p>
           </div>
         )}
 
@@ -214,7 +301,7 @@ const App: React.FC = () => {
               <div className="card-header">
                 <div style={{ flex: 1 }}>
                   <span className={`translation-badge ${result.lang !== 'pt' ? 'badge-auto' : ''}`}>
-                    {result.lang === 'pt' ? 'Original PT-BR' : 'Tradução IA / Oracle'}
+                    {result.lang === 'pt' ? 'Oficial PT-BR' : 'Tradução IA / Oracle'}
                   </span>
                   <h2>{result.printed_name || result.name}</h2>
                   <div className="card-type">{result.type_line}</div>
@@ -230,7 +317,7 @@ const App: React.FC = () => {
                     <Globe size={18} /> TRADUZIR
                   </button>
                 )}
-                <button className="glass" style={{ flex: 1, padding: '12px' }} onClick={() => { setResult(null); setCapturedImage(null); fileInputRef.current?.click(); }}>
+                <button className="glass" style={{ flex: 1, padding: '12px', border: '1px solid var(--accent-blue)' }} onClick={() => { setResult(null); setCapturedImage(null); fileInputRef.current?.click(); }}>
                   <Camera size={18} /> NOVA FOTO
                 </button>
               </div>
