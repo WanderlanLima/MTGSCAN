@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
-import { Camera, RefreshCw, X, Search, Globe, AlertCircle, Image as ImageIcon, Sparkles } from 'lucide-react';
+import { Camera, RefreshCw, X, Globe, AlertCircle, Image as ImageIcon, Sparkles } from 'lucide-react';
 
 declare global {
   interface Window {
@@ -29,7 +29,6 @@ const App: React.FC = () => {
   const [debugText, setDebugText] = useState<string>('');
   const [cvReady, setCvReady] = useState(false);
   const [workerReady, setWorkerReady] = useState(false);
-  const [capturedImage, setCapturedImage] = useState<string | null>(null);
 
   const workerRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -57,10 +56,21 @@ const App: React.FC = () => {
       }
     }, 500);
 
+    // Timeout Fallback: If vision takes >10s, allow basic scan
+    const cvTimeout = setTimeout(() => {
+      if (!window.cv || !window.cv.Mat) {
+        console.warn("OpenCV loading timed out. Falling back to basic OCR.");
+        setCvReady(true); // Still allow opening the scanner
+        setError("Visão Computacional lenta. Usando modo básico de leitura.");
+        clearInterval(checkCV);
+      }
+    }, 10000);
+
     return () => {
       active = false;
       if (workerRef.current) workerRef.current.terminate();
       clearInterval(checkCV);
+      clearTimeout(cvTimeout);
     };
   }, []);
 
@@ -76,7 +86,6 @@ const App: React.FC = () => {
     const reader = new FileReader();
     reader.onload = async (event) => {
       const imageData = event.target?.result as string;
-      setCapturedImage(imageData);
       await processWithVisualIdentity(imageData);
     };
     reader.readAsDataURL(file);
@@ -306,7 +315,7 @@ const App: React.FC = () => {
                   <h2>{result.printed_name || result.name}</h2>
                   <div className="card-type">{result.type_line}</div>
                 </div>
-                <button className="close-btn" onClick={() => { setResult(null); setCapturedImage(null); }}><X size={20} /></button>
+                <button className="close-btn" onClick={() => { setResult(null); }}><X size={20} /></button>
               </div>
               <div className="card-text">{result.translated_text || result.oracle_text}</div>
               {result.image_uris && <img src={result.image_uris.normal} alt="card" className="card-image" />}
@@ -317,7 +326,7 @@ const App: React.FC = () => {
                     <Globe size={18} /> TRADUZIR
                   </button>
                 )}
-                <button className="glass" style={{ flex: 1, padding: '12px', border: '1px solid var(--accent-blue)' }} onClick={() => { setResult(null); setCapturedImage(null); fileInputRef.current?.click(); }}>
+                <button className="glass" style={{ flex: 1, padding: '12px', border: '1px solid var(--accent-blue)' }} onClick={() => { setResult(null); fileInputRef.current?.click(); }}>
                   <Camera size={18} /> NOVA FOTO
                 </button>
               </div>
