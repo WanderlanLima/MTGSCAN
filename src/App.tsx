@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
-import { Camera, RefreshCw, X, Search, Globe, AlertCircle, Repeat, Zap } from 'lucide-react';
+import { Camera, RefreshCw, X, Search, Globe, AlertCircle, Image as ImageIcon } from 'lucide-react';
 
 interface CardData {
   name: string;
@@ -14,25 +14,18 @@ interface CardData {
     normal: string;
   };
   lang: string;
-  set: string;
-  collector_number: string;
 }
 
 const App: React.FC = () => {
-  const [isScanning, setIsScanning] = useState(false);
   const [result, setResult] = useState<CardData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [debugText, setDebugText] = useState<string>('');
   const [workerReady, setWorkerReady] = useState(false);
-  const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
-  const [activeCameraIndex, setActiveCameraIndex] = useState(0);
-  const [flashlight, setFlashlight] = useState(false);
-  const [hasPermission, setHasPermission] = useState<boolean | null>(null);
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
 
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
   const workerRef = useRef<any>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Initialize OCR Worker
   useEffect(() => {
@@ -45,25 +38,10 @@ const App: React.FC = () => {
           setWorkerReady(true);
         }
       } catch (err) {
-        if (active) setError("Scanner offline.");
+        if (active) setError("Scanner offline. Verifique sua conexão.");
       }
     };
     initWorker();
-
-    // Check permission and list cameras
-    const checkPermission = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        stream.getTracks().forEach(t => t.stop());
-        setHasPermission(true);
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = devices.filter(d => d.kind === 'videoinput');
-        setCameras(videoDevices);
-      } catch (e) {
-        setHasPermission(false);
-      }
-    };
-    checkPermission();
 
     return () => {
       active = false;
@@ -71,117 +49,59 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const startCamera = async (index: number = activeCameraIndex) => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-    }
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
     setError(null);
-
-    // Resilience Strategy: Try multiple constraints
-    const constraintOptions = [
-      // 1. High res with ideal device
-      {
-        video: {
-          deviceId: cameras[index]?.deviceId ? { exact: cameras[index].deviceId } : undefined,
-          width: { ideal: 1920 }, height: { ideal: 1080 },
-          facingMode: 'environment'
-        }
-      },
-      // 2. Standard res
-      { video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'environment' } },
-      // 3. Basic
-      { video: true }
-    ];
-
-    let success = false;
-    for (const constraints of constraintOptions) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        streamRef.current = stream;
-        setIsScanning(true);
-        success = true;
-        break;
-      } catch (err) {
-        console.warn("Failed constraints:", constraints, err);
-      }
-    }
-
-    if (!success) {
-      setError('Não foi possível ativar nenhuma câmera. Verifique se outra aba está usando a câmera.');
-    }
-  };
-
-  const toggleFlashlight = async () => {
-    if (!streamRef.current) return;
-    const track = streamRef.current.getVideoTracks()[0];
-    try {
-      await track.applyConstraints({ advanced: [{ torch: !flashlight }] } as any);
-      setFlashlight(!flashlight);
-    } catch (e) {
-      setError("Lanterna não disponível nesta lente.");
-    }
-  };
-
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-    setIsScanning(false);
-  };
-
-  useEffect(() => {
-    if (isScanning && streamRef.current && videoRef.current) {
-      const video = videoRef.current;
-      video.srcObject = streamRef.current;
-      video.onloadedmetadata = () => {
-        video.play().catch(e => console.error("Auto-play blocked:", e));
-      };
-    }
-  }, [isScanning]);
-
-  const switchLens = () => {
-    if (cameras.length < 2) return;
-    const nextIndex = (activeCameraIndex + 1) % cameras.length;
-    setActiveCameraIndex(nextIndex);
-    startCamera(nextIndex);
-  };
-
-  const processImage = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
-    const imgData = ctx.getImageData(0, 0, w, h);
-    for (let i = 0; i < imgData.data.length; i += 4) {
-      const avg = (imgData.data[i] + imgData.data[i + 1] + imgData.data[i + 2]) / 3;
-      const v = avg > 115 ? 255 : 0; // High contrast binarization
-      imgData.data[i] = imgData.data[i + 1] = imgData.data[i + 2] = v;
-    }
-    ctx.putImageData(imgData, 0, 0);
-  };
-
-  const captureAndScan = async () => {
-    if (!videoRef.current || !workerRef.current) return;
+    setResult(null);
     setLoading(true);
-    setError(null);
-    setDebugText('Processando...');
+    setDebugText('Processando imagem de alta qualidade...');
 
-    const video = videoRef.current;
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+    // Load image for preview and OCR
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const imageData = event.target?.result as string;
+      setCapturedImage(imageData);
+      await processPhoto(imageData);
+    };
+    reader.readAsDataURL(file);
+  };
 
-    // Dual Pass Capture
-    const vW = video.videoWidth;
-    const vH = video.videoHeight;
+  const processPhoto = async (imageSrc: string) => {
+    if (!workerRef.current) return;
 
     try {
-      // Zone 1: Title
-      canvas.width = 800; canvas.height = 100;
-      ctx.drawImage(video, vW * 0.1, vH * 0.1, vW * 0.8, vH * 0.12, 0, 0, 800, 100);
-      processImage(ctx, 800, 100);
+      const img = new Image();
+      img.src = imageSrc;
+      await img.decode();
+
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+
+      // We process the original high-res image for better OCR
+      // Pass 1: Card Title Zone (Top 15%)
+      canvas.width = img.width;
+      canvas.height = img.height * 0.15;
+      ctx.drawImage(img, 0, 0, img.width, img.height * 0.15, 0, 0, canvas.width, canvas.height);
+
+      // Pre-processing Title
+      const titleData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      for (let i = 0; i < titleData.data.length; i += 4) {
+        const avg = (titleData.data[i] + titleData.data[i + 1] + titleData.data[i + 2]) / 3;
+        const v = avg > 110 ? 255 : 0;
+        titleData.data[i] = titleData.data[i + 1] = titleData.data[i + 2] = v;
+      }
+      ctx.putImageData(titleData, 0, 0);
+
+      setDebugText('Lendo título com precisão...');
       const { data: { text: titleText } } = await workerRef.current.recognize(canvas);
 
-      // Zone 2: Bottom Info
-      canvas.width = 400; canvas.height = 80;
-      ctx.drawImage(video, vW * 0.05, vH * 0.8, vW * 0.4, vH * 0.15, 0, 0, 400, 80);
-      processImage(ctx, 400, 80);
+      // Pass 2: Collector Info Zone (Bottom 15%, Left Half)
+      canvas.height = img.height * 0.15;
+      ctx.drawImage(img, 0, img.height * 0.85, img.width * 0.5, img.height * 0.15, 0, 0, img.width * 0.5, canvas.height);
+
+      setDebugText('Buscando DNA da carta (rodapé)...');
       const { data: { text: infoText } } = await workerRef.current.recognize(canvas);
 
       const codes = infoText.match(/([A-Z0-9]{3,})\s*(\d+)/i);
@@ -189,11 +109,11 @@ const App: React.FC = () => {
         await searchBySet(codes[1], codes[2]);
       } else {
         const cleanTitle = titleText.trim().replace(/[^a-zA-Z\s]/g, '');
-        if (cleanTitle.length > 3) await searchByName(cleanTitle);
-        else setError("Imagem borrada. Tente afastar um pouco ou limpar a lente.");
+        if (cleanTitle.length > 2) await searchByName(cleanTitle);
+        else setError("Não consegui ler o nome. Verifique se a foto está bem iluminada e nítida.");
       }
     } catch (e) {
-      setError("Falha no scanner.");
+      setError("Erro ao processar a foto.");
     } finally {
       setLoading(false);
       setDebugText('');
@@ -204,7 +124,12 @@ const App: React.FC = () => {
     try {
       const res = await fetch(`https://api.scryfall.com/cards/${set.toLowerCase()}/${num}`);
       if (res.ok) await fetchPTVersion(await res.json());
-      else await searchByName(set + " " + num); // Fallback
+      else {
+        // Fallback to name search if set info is wrong
+        setDebugText('Código não encontrado, tentando por nome...');
+        const cleanTitle = debugText; // Placeholder logic
+        await searchByName(set + " " + num);
+      }
     } catch (e) { }
   };
 
@@ -214,7 +139,7 @@ const App: React.FC = () => {
       const target = (auto.data && auto.data.length > 0) ? auto.data[0] : name;
       const res = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(target)}`);
       if (res.ok) await fetchPTVersion(await res.json());
-      else setError("Carta não encontrada.");
+      else setError("Carta não encontrada no banco de dados.");
     } catch (e) { }
   };
 
@@ -246,17 +171,6 @@ const App: React.FC = () => {
     } finally { setLoading(false); }
   };
 
-  if (hasPermission === false) {
-    return (
-      <div className="app-container" style={{ padding: '40px', textAlign: 'center' }}>
-        <AlertCircle size={48} color="var(--accent-red)" />
-        <h2>Câmera Bloqueada</h2>
-        <p>Por favor, permita o acesso à câmera nas configurações do seu navegador para usar o Scanner.</p>
-        <button className="btn-primary" onClick={() => window.location.reload()}>Recarregar Página</button>
-      </div>
-    );
-  }
-
   return (
     <div className="app-container">
       <div className="logo-overlay">
@@ -264,80 +178,81 @@ const App: React.FC = () => {
         <span className="logo-text">ScanMTG</span>
       </div>
 
-      <div className="scanner-viewport">
-        {!isScanning ? (
-          <div className="scanner-overlay" style={{ pointerEvents: 'auto' }}>
-            <img src="pwa-192x192.png" style={{ width: '80px', borderRadius: '20px', marginBottom: '20px' }} alt="PWA Logo" />
-            <button className="btn-primary" onClick={() => startCamera()} disabled={!workerReady}>
-              {workerReady ? <Camera size={24} /> : <RefreshCw size={24} className="animate-spin" />}
-              {workerReady ? 'ABRIR SCANNER' : 'CARREGANDO IA...'}
+      <main className="main-content">
+        {!loading && !result && !capturedImage && (
+          <div className="welcome-screen">
+            <div className="hero-icon">
+              <ImageIcon size={48} color="var(--accent-blue)" />
+            </div>
+            <h1>Scanner de Alta Precisão</h1>
+            <p>Use a câmera nativa do seu celular para resultados profissionais.</p>
+
+            <div className="tips-container">
+              <div className="tip-item">✨ Foto nítida e bem iluminada</div>
+              <div className="tip-item">📄 Título da carta legível</div>
+              <div className="tip-item">🎯 Rodapé deve estar visível</div>
+            </div>
+
+            <button className="btn-primary main-scan-btn" onClick={() => fileInputRef.current?.click()}>
+              <Camera size={24} />
+              IDENTIFICAR CARTA
             </button>
           </div>
-        ) : (
-          <>
-            <video ref={videoRef} autoPlay playsInline muted />
-            <div className="scanner-overlay">
-              <div className="scan-focus-corners" style={{ opacity: 0.4 }}>
-                <div className="corner tl"></div><div className="corner tr"></div>
-                <div className="corner bl"></div><div className="corner br"></div>
+        )}
+
+        {loading && (
+          <div className="loading-state">
+            <RefreshCw size={48} className="animate-spin" color="var(--accent-blue)" />
+            <h2>{debugText || 'Analisando DNA da carta...'}</h2>
+            <p>Isso pode levar alguns segundos devido à alta resolução.</p>
+          </div>
+        )}
+
+        {result && (
+          <div className="card-result-container">
+            <div className={`card-result glass open`}>
+              <div className="card-header">
+                <div style={{ flex: 1 }}>
+                  <span className={`translation-badge ${result.lang !== 'pt' ? 'badge-auto' : ''}`}>
+                    {result.lang === 'pt' ? 'Original PT-BR' : 'Tradução IA / Oracle'}
+                  </span>
+                  <h2>{result.printed_name || result.name}</h2>
+                  <div className="card-type">{result.type_line}</div>
+                </div>
+                <button className="close-btn" onClick={() => { setResult(null); setCapturedImage(null); }}><X size={20} /></button>
+              </div>
+              <div className="card-text">{result.translated_text || result.oracle_text}</div>
+              {result.image_uris && <img src={result.image_uris.normal} alt="card" className="card-image" />}
+
+              <div className="action-buttons">
+                {result.lang !== 'pt' && !result.translated_text && (
+                  <button className="btn-primary" style={{ flex: 1 }} onClick={translate}>
+                    <Globe size={18} /> TRADUZIR
+                  </button>
+                )}
+                <button className="glass" style={{ flex: 1, padding: '12px' }} onClick={() => { setResult(null); setCapturedImage(null); fileInputRef.current?.click(); }}>
+                  <Camera size={18} /> NOVA FOTO
+                </button>
               </div>
             </div>
-
-            <div className="camera-actions" style={{ position: 'absolute', right: '20px', top: '100px', display: 'flex', flexDirection: 'column', gap: '20px', pointerEvents: 'auto' }}>
-              {cameras.length > 1 && (
-                <button className="glass" onClick={switchLens} style={{ padding: '15px', borderRadius: '50%', color: 'white' }}>
-                  <Repeat size={24} />
-                </button>
-              )}
-              <button className="glass" onClick={toggleFlashlight} style={{ padding: '15px', borderRadius: '50%', color: flashlight ? 'var(--accent-blue)' : 'white' }}>
-                <Zap size={24} />
-              </button>
-            </div>
-
-            <div className="controls">
-              <button className="btn-primary" onClick={captureAndScan} disabled={loading} style={{ transform: 'scale(1.1)' }}>
-                {loading ? <RefreshCw size={24} className="animate-spin" /> : <Search size={24} />}
-                {loading ? 'IDENTIFICANDO...' : 'ESCANEAR'}
-              </button>
-              <button className="glass" style={{ color: '#fff', padding: '16px', borderRadius: '50%' }} onClick={stopCamera}>
-                <X size={24} />
-              </button>
-            </div>
-          </>
+          </div>
         )}
-      </div>
+
+        <input
+          type="file"
+          accept="image/*"
+          capture="environment"
+          ref={fileInputRef}
+          onChange={handleFileChange}
+          style={{ display: 'none' }}
+        />
+      </main>
 
       {error && (
-        <div style={{ position: 'fixed', bottom: '120px', left: '20px', right: '20px', background: 'var(--accent-red)', color: '#fff', padding: '12px', borderRadius: '12px', zIndex: 200, textAlign: 'center' }}>
-          {error}
-        </div>
-      )}
-
-      {result && (
-        <div className={`card-result glass open`}>
-          <div className="card-header">
-            <div style={{ flex: 1 }}>
-              <span className={`translation-badge ${result.lang !== 'pt' ? 'badge-auto' : ''}`}>
-                {result.lang === 'pt' ? 'Original PT-BR' : 'Tradução IA'}
-              </span>
-              <h2>{result.printed_name || result.name}</h2>
-              <div className="card-type">{result.type_line}</div>
-            </div>
-            <button className="close-btn" onClick={() => setResult(null)}><X size={20} /></button>
-          </div>
-          <div className="card-text">{result.translated_text || result.oracle_text}</div>
-          {result.image_uris && <img src={result.image_uris.normal} alt="card" style={{ width: '100%', borderRadius: '12px' }} />}
-          {result.lang !== 'pt' && !result.translated_text && (
-            <button className="btn-primary" style={{ width: '100%', marginTop: '15px' }} onClick={translate}>
-              <Globe size={18} /> TRADUZIR AGORA
-            </button>
-          )}
-        </div>
-      )}
-
-      {debugText && (
-        <div style={{ position: 'fixed', bottom: '110px', left: '50%', transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.7)', fontSize: '0.7rem' }}>
-          {debugText}
+        <div className="error-toast">
+          <AlertCircle size={20} />
+          <span>{error}</span>
+          <button onClick={() => setError(null)}><X size={16} /></button>
         </div>
       )}
     </div>
